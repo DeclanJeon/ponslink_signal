@@ -12,6 +12,7 @@ module.exports = (io, socket, pubClient) => {
    * TURN 자격증명 즉시 제공 - 검증 최소화
    */
   const getTurnCredentials = async () => {
+
     console.log(`[TURN] ⚡ Fast credentials for ${socket.data.userId}`);
     
     // 🔥 기본 검증만 수행

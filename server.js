@@ -28,9 +28,6 @@ const turnAuthMiddleware = require('./middleware/turnAuth');
 // 라우트
 const initializeTurnStatsRoutes = require('./routes/turnStats');
 
-// 서비스
-const TurnMonitor = require('./services/turnMonitor');
-
 // --- 환경 변수 유효성 검사 ---
 if (!process.env.CORS_ALLOWED_ORIGINS) {
   console.error("오류: .env 파일에 CORS_ALLOWED_ORIGINS가 정의되지 않았습니다.");
@@ -66,29 +63,12 @@ async function startServer() {
   const turnStatsRouter = initializeTurnStatsRoutes(pubClient);
   app.use(turnStatsRouter);
   
-  // 헬스체크 엔드포인트
-  app.get('/health', (req, res) => {
-    const turnConfig = TurnConfig.getConfig();
-    res.json({
-      status: 'healthy',
-      timestamp: Date.now(),
-      turn: {
-        enabled: turnConfig.enabled,
-        configured: !!turnConfig.serverUrl,
-        monitoring: turnConfig.enableMetrics,
-        limits: {
-          maxConnections: turnConfig.maxConnectionsPerUser,
-          dailyQuota: `${(turnConfig.quotaPerDay / 1024 / 1024 / 1024).toFixed(2)}GB`,
-          maxBandwidth: `${(turnConfig.maxBandwidth / 1024 / 1024).toFixed(2)}MB/s`
-        }
-      }
-    });
-  });
-  
   // Socket.IO 연결 핸들러
   const onConnection = (socket) => {
     console.log(`[CONNECT] 사용자 연결됨: ${socket.id}`);
-    
+
+    socket.data.userId = socket.id;
+
     // 각 핸들러 모듈에 필요한 의존성 주입
     registerRoomHandlers(io, socket, pubClient);
     registerMessageHandlers(io, socket, pubClient);
