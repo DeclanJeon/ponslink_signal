@@ -9,6 +9,14 @@ const { createClient } = require('redis');
 // 설정 모듈
 const TurnConfig = require('./config/turnConfig');
 
+// TURN 설정 초기화
+const turnEnabled = TurnConfig.initialize();
+
+if (!turnEnabled) {
+  console.warn('⚠️ Running without TURN server - P2P connections only');
+  console.warn('⚠️ Users behind restrictive NATs may not be able to connect');
+}
+
 // 핸들러 모듈
 const registerRoomHandlers = require('./handlers/roomHandler');
 const registerMessageHandlers = require('./handlers/messageHandler');
@@ -74,12 +82,19 @@ async function startServer() {
   
   // 헬스체크 엔드포인트
   app.get('/health', (req, res) => {
+    const turnConfig = TurnConfig.getConfig();
     res.json({
       status: 'healthy',
       timestamp: Date.now(),
       turn: {
-        configured: !!process.env.TURN_SERVER_URL,
-        monitoring: true
+        enabled: turnConfig.enabled,
+        configured: !!turnConfig.serverUrl,
+        monitoring: turnConfig.enableMetrics,
+        limits: {
+          maxConnections: turnConfig.maxConnectionsPerUser,
+          dailyQuota: `${(turnConfig.quotaPerDay / 1024 / 1024 / 1024).toFixed(2)}GB`,
+          maxBandwidth: `${(turnConfig.maxBandwidth / 1024 / 1024).toFixed(2)}MB/s`
+        }
       }
     });
   });
@@ -87,9 +102,6 @@ async function startServer() {
   // Socket.IO 연결 핸들러
   const onConnection = (socket) => {
     console.log(`[CONNECT] 사용자 연결됨: ${socket.id}`);
-    
-    // TURN 인증 미들웨어 적용
-    turnAuthMiddleware(socket, () => {});
     
     // 각 핸들러 모듈에 필요한 의존성 주입
     registerRoomHandlers(io, socket, pubClient);

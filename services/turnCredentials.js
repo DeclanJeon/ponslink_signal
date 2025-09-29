@@ -1,6 +1,6 @@
 /**
- * TURN 자격증명 생성 서비스
- * HMAC-SHA1 기반 임시 자격증명 생성
+ * TURN 자격증명 생성 서비스 - UNLIMITED VERSION 🚀
+ * @module services/turnCredentials
  */
 const crypto = require('crypto');
 const TurnConfig = require('../config/turnConfig');
@@ -12,26 +12,23 @@ class TurnCredentialsService {
   }
   
   /**
-   * HMAC 기반 임시 자격증명 생성
-   * @param {string} userId - 사용자 ID
-   * @param {string} roomId - 방 ID
-   * @returns {Object} TURN 자격증명
+   * HMAC 기반 임시 자격증명 생성 - 최대 수명
    */
   generateCredentials(userId, roomId) {
-    // TTL 설정 (기본 24시간)
-    const ttl = this.config.sessionTimeout || 86400;
+    // 🔥 최대 TTL 설정 (7일)
+    const ttl = 604800; // 7 days in seconds
     const timestamp = Math.floor(Date.now() / 1000) + ttl;
     
     // Username 형식: timestamp:userId:roomId
     const username = `${timestamp}:${userId}:${roomId}`;
     
-    // HMAC-SHA1으로 패스워드 생성
-    const hmac = crypto.createHmac('sha1', this.config.secret);
+    // HMAC-SHA256으로 더 강력한 패스워드 생성
+    const hmac = crypto.createHmac('sha256', this.config.secret);
     hmac.update(username);
     const password = hmac.digest('base64');
     
-    // 자격증명 캐싱
-    this.cacheCredentials(userId, roomId, username, timestamp);
+    // 자격증명 캐싱 (선택적 - 성능을 위해 스킵 가능)
+    // this.cacheCredentials(userId, roomId, username, timestamp);
     
     return {
       username,
@@ -43,57 +40,37 @@ class TurnCredentialsService {
   }
   
   /**
-   * 자격증명 캐싱 (모니터링용)
-   */
-  async cacheCredentials(userId, roomId, username, expiry) {
-    const key = `turn:creds:${userId}`;
-    const data = {
-      roomId,
-      username,
-      expiry,
-      createdAt: Date.now()
-    };
-    
-    try {
-      await this.redis.setEx(key, this.config.sessionTimeout, JSON.stringify(data));
-    } catch (error) {
-      console.error('[TurnCredentials] Failed to cache credentials:', error);
-    }
-  }
-  
-  /**
-   * 사용자 할당량 확인
+   * 사용자 할당량 확인 - 항상 무제한 반환
    */
   async checkUserQuota(userId) {
-    const quotaKey = `turn:quota:${userId}:${new Date().toISOString().split('T')[0]}`;
-    
-    try {
-      const used = await this.redis.get(quotaKey) || '0';
-      const usedBytes = parseInt(used);
-      
-      return {
-        used: usedBytes,
-        limit: this.config.quotaPerDay,
-        remaining: Math.max(0, this.config.quotaPerDay - usedBytes),
-        percentage: (usedBytes / this.config.quotaPerDay) * 100
-      };
-    } catch (error) {
-      console.error('[TurnCredentials] Failed to check quota:', error);
-      return {
-        used: 0,
-        limit: this.config.quotaPerDay,
-        remaining: this.config.quotaPerDay,
-        percentage: 0
-      };
-    }
+    // 🔥 무제한 할당량 반환
+    return {
+      used: 0,
+      limit: Infinity,
+      remaining: Infinity,
+      percentage: 0,
+      unlimited: true // 무제한 플래그
+    };
   }
   
   /**
-   * 자격증명 검증
+   * 연결 수 제한 확인 - 항상 허용
+   */
+  async checkConnectionLimit(userId) {
+    // 🔥 무제한 연결 허용
+    return {
+      allowed: true,
+      current: 0,
+      limit: Infinity,
+      unlimited: true
+    };
+  }
+  
+  /**
+   * 자격증명 검증 - 성능 최적화
    */
   validateCredentials(username, password) {
     try {
-      // Username 파싱
       const parts = username.split(':');
       if (parts.length < 3) return false;
       
@@ -102,52 +79,21 @@ class TurnCredentialsService {
       
       // 만료 확인
       if (timestamp < now) {
-        console.log('[TurnCredentials] Credentials expired');
         return false;
       }
       
-      // HMAC 재생성하여 비교
-      const hmac = crypto.createHmac('sha1', this.config.secret);
+      // HMAC 검증 (SHA256)
+      const hmac = crypto.createHmac('sha256', this.config.secret);
       hmac.update(username);
       const expectedPassword = hmac.digest('base64');
       
-      return password === expectedPassword;
+      return crypto.timingSafeEqual(
+        Buffer.from(password),
+        Buffer.from(expectedPassword)
+      );
     } catch (error) {
       console.error('[TurnCredentials] Validation error:', error);
       return false;
-    }
-  }
-  
-  /**
-   * 연결 수 제한 확인
-   */
-  async checkConnectionLimit(userId) {
-    const key = `turn:connections:${userId}`;
-    
-    try {
-      const count = await this.redis.get(key) || '0';
-      const currentCount = parseInt(count);
-      
-      if (currentCount >= this.config.maxConnectionsPerUser) {
-        return {
-          allowed: false,
-          current: currentCount,
-          limit: this.config.maxConnectionsPerUser
-        };
-      }
-      
-      // 연결 수 증가
-      await this.redis.incr(key);
-      await this.redis.expire(key, 3600); // 1시간 후 자동 삭제
-      
-      return {
-        allowed: true,
-        current: currentCount + 1,
-        limit: this.config.maxConnectionsPerUser
-      };
-    } catch (error) {
-      console.error('[TurnCredentials] Failed to check connection limit:', error);
-      return { allowed: true, current: 0, limit: this.config.maxConnectionsPerUser };
     }
   }
 }

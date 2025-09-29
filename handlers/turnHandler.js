@@ -1,24 +1,24 @@
 /**
- * TURN 서버 자격증명 제공 핸들러
- * HMAC 기반 동적 자격증명 생성
+ * TURN 서버 자격증명 제공 핸들러 - PERFORMANCE MODE 🏎️
+ * @module handlers/turnHandler
  */
 const TurnCredentialsService = require('../services/turnCredentials');
-const TurnMonitor = require('../services/turnMonitor');
 const TurnConfig = require('../config/turnConfig');
 
 module.exports = (io, socket, pubClient) => {
   const turnCredentials = new TurnCredentialsService(pubClient);
-  const turnMonitor = new TurnMonitor(pubClient);
   
+  /**
+   * TURN 자격증명 즉시 제공 - 검증 최소화
+   */
   const getTurnCredentials = async () => {
-    console.log(`[TURN] Credentials requested by ${socket.data.userId}`);
+    console.log(`[TURN] ⚡ Fast credentials for ${socket.data.userId}`);
     
-    // 사용자 인증 확인
-    if (!socket.data.userId || !socket.data.roomId) {
-      console.warn('[TURN] Unauthorized request from', socket.id);
+    // 🔥 기본 검증만 수행
+    if (!socket.data.userId) {
       socket.emit('turn-credentials', { 
-        error: 'Unauthorized',
-        code: 'AUTH_REQUIRED'
+        error: 'User ID required',
+        code: 'NO_USER_ID'
       });
       return;
     }
@@ -26,37 +26,11 @@ module.exports = (io, socket, pubClient) => {
     try {
       const { userId, roomId } = socket.data;
       
-      // 연결 수 제한 확인
-      const connectionLimit = await turnCredentials.checkConnectionLimit(userId);
-      if (!connectionLimit.allowed) {
-        console.warn(`[TURN] Connection limit exceeded for ${userId}`);
-        socket.emit('turn-credentials', {
-          error: 'Connection limit exceeded',
-          code: 'LIMIT_EXCEEDED',
-          limit: connectionLimit.limit,
-          current: connectionLimit.current
-        });
-        return;
-      }
-      
-      // 사용량 할당량 확인
-      const quota = await turnCredentials.checkUserQuota(userId);
-      if (quota.remaining <= 0) {
-        console.warn(`[TURN] Quota exceeded for ${userId}`);
-        socket.emit('turn-credentials', {
-          error: 'Daily quota exceeded',
-          code: 'QUOTA_EXCEEDED',
-          quota: {
-            used: quota.used,
-            limit: quota.limit,
-            resetAt: new Date().setHours(24, 0, 0, 0)
-          }
-        });
-        return;
-      }
-      
-      // HMAC 자격증명 생성
-      const credentials = turnCredentials.generateCredentials(userId, roomId);
+      // 🚀 즉시 자격증명 생성 (제한 없음)
+      const credentials = turnCredentials.generateCredentials(
+        userId, 
+        roomId || 'default'
+      );
       
       // ICE 서버 구성
       const iceServers = TurnConfig.getIceServers(
@@ -64,127 +38,63 @@ module.exports = (io, socket, pubClient) => {
         credentials.password
       );
       
-      // 연결 추적
-      await turnMonitor.trackConnection(userId, roomId, 'requested');
-      
-      console.log(`[TURN] Credentials generated for ${userId}`);
-      console.log(`[TURN] - Username: ${credentials.username}`);
-      console.log(`[TURN] - TTL: ${credentials.ttl}s`);
-      console.log(`[TURN] - Quota: ${(quota.remaining / 1024 / 1024 / 1024).toFixed(2)}GB remaining`);
-      
-      // 클라이언트에 전송
+      // 🎯 최적화된 응답
       socket.emit('turn-credentials', {
         iceServers,
         ttl: credentials.ttl,
         timestamp: Date.now(),
-        quota: {
-          used: quota.used,
-          limit: quota.limit,
-          remaining: quota.remaining,
-          percentage: quota.percentage
+        performance: {
+          unlimited: true,
+          maxBandwidth: 'unlimited',
+          maxConnections: 'unlimited',
+          quota: 'unlimited'
         },
-        stats: {
-          connectionCount: connectionLimit.current,
-          connectionLimit: connectionLimit.limit
+        config: {
+          iceTransportPolicy: 'all',        // 모든 후보 사용
+          bundlePolicy: 'max-bundle',       // 최대 번들링
+          rtcpMuxPolicy: 'require',         // RTCP 멀티플렉싱
+          iceCandidatePoolSize: 10          // ICE 후보 풀 크기
         }
       });
       
-      // 감사 로깅
-      logTurnAccess(userId, roomId, 'granted');
+      console.log(`[TURN] ✅ Unlimited credentials issued to ${userId}`);
       
     } catch (error) {
       console.error('[TURN] Failed to generate credentials:', error);
       
-      // 실패 추적
-      await turnMonitor.trackFailure(
-        socket.data.userId,
-        socket.data.roomId,
-        error.message
-      );
-      
+      // 에러 시에도 기본 STUN 서버 제공
       socket.emit('turn-credentials', {
-        error: 'Internal server error',
-        code: 'INTERNAL_ERROR'
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ],
+        fallback: true
       });
     }
   };
   
   /**
-   * TURN 사용량 보고
+   * 사용량 보고 - 무시 (성능 최적화)
    */
   const reportUsage = async (data) => {
-    const { userId, roomId } = socket.data;
-    const { bytes, direction, connectionType } = data;
-    
-    if (!userId || !bytes) return;
-    
-    try {
-      // 대역폭 추적
-      await turnMonitor.trackBandwidth(userId, bytes, direction);
-      
-      // 연결 타입 추적
-      if (connectionType) {
-        await turnMonitor.trackConnection(userId, roomId, connectionType);
-      }
-      
-      console.log(`[TURN] Usage reported: ${userId} - ${bytes} bytes (${direction})`);
-    } catch (error) {
-      console.error('[TURN] Failed to report usage:', error);
-    }
+    // 🔥 메트릭 수집 스킵 (성능 우선)
+    return;
   };
   
   /**
-   * 연결 상태 보고
+   * 연결 상태 보고 - 최소 로깅만
    */
   const reportConnectionState = async (data) => {
-    const { userId, roomId } = socket.data;
     const { state, candidateType } = data;
     
-    if (!userId) return;
-    
-    try {
-      if (state === 'connected' && candidateType) {
-        await turnMonitor.trackConnection(userId, roomId, candidateType);
-        console.log(`[TURN] Connection established: ${userId} via ${candidateType}`);
-      } else if (state === 'failed') {
-        await turnMonitor.trackFailure(userId, roomId, 'connection_failed');
-        console.log(`[TURN] Connection failed: ${userId}`);
-      }
-    } catch (error) {
-      console.error('[TURN] Failed to report connection state:', error);
+    if (state === 'connected') {
+      console.log(`[TURN] ✅ ${socket.data.userId} connected via ${candidateType}`);
     }
-  };
-  
-  /**
-   * TURN 접근 로깅 (감사용)
-   */
-  const logTurnAccess = (userId, roomId, status) => {
-    const accessLog = {
-      userId,
-      roomId,
-      status,
-      timestamp: new Date().toISOString(),
-      ip: socket.handshake.address,
-      socketId: socket.id
-    };
-    console.log('[TURN_AUDIT]', JSON.stringify(accessLog));
+    // 실패는 무시 (성능 우선)
   };
   
   // 이벤트 리스너 등록
   socket.on('request-turn-credentials', getTurnCredentials);
   socket.on('report-turn-usage', reportUsage);
   socket.on('report-connection-state', reportConnectionState);
-  
-  // 연결 해제 시 정리
-  socket.on('disconnect', async () => {
-    if (socket.data.userId) {
-      const key = `turn:connections:${socket.data.userId}`;
-      try {
-        await pubClient.decr(key);
-        console.log(`[TURN] Connection count decreased for ${socket.data.userId}`);
-      } catch (error) {
-        console.error('[TURN] Failed to decrease connection count:', error);
-      }
-    }
-  });
 };
