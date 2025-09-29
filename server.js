@@ -36,6 +36,22 @@ const io = new Server(server, {
 const pubClient = createClient({ url: 'redis://localhost:6379' });
 const subClient = pubClient.duplicate();
 
+function validateTurnConfig() {
+  const required = ['TURN_SERVER_URL', 'TURN_USERNAME', 'TURN_PASSWORD'];
+  const missing = required.filter(key => !process.env[key]);
+  
+  if (missing.length > 0) {
+    console.warn(`⚠️ TURN 설정 누락: ${missing.join(', ')}`);
+    console.warn('⚠️ NAT 환경에서 연결 문제가 발생할 수 있습니다.');
+    return false;
+  }
+  
+  console.log('✅ TURN 서버 설정 완료');
+  console.log(`   - Server: ${process.env.TURN_SERVER_URL}`);
+  console.log(`   - Username: ${process.env.TURN_USERNAME.substring(0, 3)}***`);
+  return true;
+}
+
 async function startServer() {
   await Promise.all([pubClient.connect(), subClient.connect()]);
   io.adapter(createAdapter(pubClient, subClient));
@@ -50,7 +66,8 @@ async function startServer() {
   };
 
   io.on('connection', onConnection);
-  // --- 수정 종료 ---
+
+  validateTurnConfig();
 
   const PORT = process.env.PORT;
   server.listen(PORT, () => {
