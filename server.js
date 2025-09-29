@@ -10,7 +10,7 @@ const { createClient } = require('redis');
 const TurnConfig = require('./config/turnConfig');
 
 // TURN 설정 초기화
-const turnEnabled = TurnConfig.initialize();
+const turnEnabled = TurnConfig.validate();
 
 if (!turnEnabled) {
   console.warn('⚠️ Running without TURN server - P2P connections only');
@@ -41,14 +41,6 @@ if (!process.env.PORT) {
   process.exit(1);
 }
 
-// TURN 설정 검증
-try {
-  TurnConfig.validate();
-} catch (error) {
-  console.error("오류: TURN 설정 검증 실패:", error.message);
-  console.warn("⚠️ TURN 서버 없이 계속 진행합니다. P2P 연결만 가능합니다.");
-}
-
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -66,15 +58,9 @@ const io = new Server(server, {
 const pubClient = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
 const subClient = pubClient.duplicate();
 
-// TURN 모니터링 서비스 초기화
-let turnMonitor;
-
 async function startServer() {
   await Promise.all([pubClient.connect(), subClient.connect()]);
   io.adapter(createAdapter(pubClient, subClient));
-  
-  // TURN 모니터링 초기화
-  turnMonitor = new TurnMonitor(pubClient);
   
   // API 라우트 등록
   const turnStatsRouter = initializeTurnStatsRoutes(pubClient);
@@ -127,14 +113,6 @@ async function startServer() {
   server.listen(PORT, () => {
     console.log(`✅ 시그널링 서버가 포트 ${PORT}에서 실행 중입니다.`);
   });
-  
-  // 정리 작업 스케줄러 (1시간마다)
-  setInterval(async () => {
-    if (turnMonitor) {
-      await turnMonitor.cleanup();
-      console.log('[Cleanup] TURN 모니터링 데이터 정리 완료');
-    }
-  }, 3600000);
 }
 
 // Graceful shutdown

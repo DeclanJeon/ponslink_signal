@@ -2,7 +2,7 @@
  * TURN 자격증명 요청 검증 미들웨어
  * Rate limiting 및 보안 검증 강화
  */
-const TurnConfig = require('../config/turnConfig');
+// const TurnConfig = require('../config/turnConfig');
 
 const turnAuthMiddleware = (socket, next) => {
   // socket.use(([event, ...args], next) => {

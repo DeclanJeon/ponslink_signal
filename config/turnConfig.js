@@ -1,4 +1,4 @@
-Copy/**
+/**
  * TURN 서버 설정 관리 - UNLIMITED POWER! ⚡
  * @module config/turnConfig
  */
