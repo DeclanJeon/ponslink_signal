@@ -6,9 +6,22 @@ const cors = require('cors');
 const { createAdapter } = require('@socket.io/redis-adapter');
 const { createClient } = require('redis');
 
-// <<< [수정] 핸들러 모듈 import
+// 설정 모듈
+const TurnConfig = require('./config/turnConfig');
+
+// 핸들러 모듈
 const registerRoomHandlers = require('./handlers/roomHandler');
 const registerMessageHandlers = require('./handlers/messageHandler');
+const registerTurnHandlers = require('./handlers/turnHandler');
+
+// 미들웨어
+const turnAuthMiddleware = require('./middleware/turnAuth');
+
+// 라우트
+const initializeTurnStatsRoutes = require('./routes/turnStats');
+
+// 서비스
+const TurnMonitor = require('./services/turnMonitor');
 
 // --- 환경 변수 유효성 검사 ---
 if (!process.env.CORS_ALLOWED_ORIGINS) {
@@ -19,10 +32,19 @@ if (!process.env.PORT) {
   console.error("오류: .env 파일에 PORT가 정의되지 않았습니다.");
   process.exit(1);
 }
-// --- 환경 변수 유효성 검사 종료 ---
+
+// TURN 설정 검증
+try {
+  TurnConfig.validate();
+} catch (error) {
+  console.error("오류: TURN 설정 검증 실패:", error.message);
+  console.warn("⚠️ TURN 서버 없이 계속 진행합니다. P2P 연결만 가능합니다.");
+}
 
 const app = express();
 app.use(cors());
+app.use(express.json());
+
 const server = http.createServer(app);
 
 const io = new Server(server, {
@@ -33,47 +55,87 @@ const io = new Server(server, {
   maxHttpBufferSize: 1e8 // 100 MB
 });
 
-const pubClient = createClient({ url: 'redis://localhost:6379' });
+const pubClient = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
 const subClient = pubClient.duplicate();
 
-function validateTurnConfig() {
-  const required = ['TURN_SERVER_URL', 'TURN_USERNAME', 'TURN_PASSWORD'];
-  const missing = required.filter(key => !process.env[key]);
-  
-  if (missing.length > 0) {
-    console.warn(`⚠️ TURN 설정 누락: ${missing.join(', ')}`);
-    console.warn('⚠️ NAT 환경에서 연결 문제가 발생할 수 있습니다.');
-    return false;
-  }
-  
-  console.log('✅ TURN 서버 설정 완료');
-  console.log(`   - Server: ${process.env.TURN_SERVER_URL}`);
-  console.log(`   - Username: ${process.env.TURN_USERNAME.substring(0, 3)}***`);
-  return true;
-}
+// TURN 모니터링 서비스 초기화
+let turnMonitor;
 
 async function startServer() {
   await Promise.all([pubClient.connect(), subClient.connect()]);
   io.adapter(createAdapter(pubClient, subClient));
-
-  // <<< [수정] connection 이벤트 로직을 핸들러 등록으로 변경
+  
+  // TURN 모니터링 초기화
+  turnMonitor = new TurnMonitor(pubClient);
+  
+  // API 라우트 등록
+  const turnStatsRouter = initializeTurnStatsRoutes(pubClient);
+  app.use(turnStatsRouter);
+  
+  // 헬스체크 엔드포인트
+  app.get('/health', (req, res) => {
+    res.json({
+      status: 'healthy',
+      timestamp: Date.now(),
+      turn: {
+        configured: !!process.env.TURN_SERVER_URL,
+        monitoring: true
+      }
+    });
+  });
+  
+  // Socket.IO 연결 핸들러
   const onConnection = (socket) => {
     console.log(`[CONNECT] 사용자 연결됨: ${socket.id}`);
     
-    // 각 핸들러 모듈에 필요한 의존성(io, socket, pubClient) 주입
+    // TURN 인증 미들웨어 적용
+    turnAuthMiddleware(socket, () => {});
+    
+    // 각 핸들러 모듈에 필요한 의존성 주입
     registerRoomHandlers(io, socket, pubClient);
     registerMessageHandlers(io, socket, pubClient);
+    registerTurnHandlers(io, socket, pubClient);
   };
 
   io.on('connection', onConnection);
 
-  validateTurnConfig();
+  // TURN 설정 상태 출력
+  const turnConfig = TurnConfig.getConfig();
+  console.log('============================================');
+  console.log('🔐 TURN Server Configuration:');
+  console.log(`   - Server: ${turnConfig.serverUrl || 'Not configured'}`);
+  console.log(`   - Realm: ${turnConfig.realm}`);
+  console.log(`   - Session Timeout: ${turnConfig.sessionTimeout}s`);
+  console.log(`   - Max Connections/User: ${turnConfig.maxConnectionsPerUser}`);
+  console.log(`   - Daily Quota: ${(turnConfig.quotaPerDay / 1024 / 1024 / 1024).toFixed(2)}GB`);
+  console.log(`   - Monitoring: ${turnConfig.enableMetrics ? 'Enabled' : 'Disabled'}`);
+  console.log('============================================');
 
   const PORT = process.env.PORT;
   server.listen(PORT, () => {
-    console.log(`시그널링 서버가 포트 ${PORT}에서 실행 중입니다.`);
+    console.log(`✅ 시그널링 서버가 포트 ${PORT}에서 실행 중입니다.`);
   });
+  
+  // 정리 작업 스케줄러 (1시간마다)
+  setInterval(async () => {
+    if (turnMonitor) {
+      await turnMonitor.cleanup();
+      console.log('[Cleanup] TURN 모니터링 데이터 정리 완료');
+    }
+  }, 3600000);
 }
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM 신호 수신. 서버를 정상 종료합니다...');
+  
+  io.close();
+  await pubClient.quit();
+  await subClient.quit();
+  server.close();
+  
+  process.exit(0);
+});
 
 startServer().catch(err => {
   console.error("서버 시작 실패:", err);
