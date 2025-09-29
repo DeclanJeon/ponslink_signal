@@ -12,8 +12,11 @@ module.exports = (io, socket, pubClient) => {
       }
 
       socket.join(roomId);
+      
+      socket.data.userId = userId;
       socket.data.roomId = roomId;
       socket.data.nickname = nickname;
+
       console.log(`[DEBUG] 🔗 사용자(${userId})의 소켓(${socket.id})이 방(${roomId})에 성공적으로 연결되었습니다.`);
       console.log(`[DEBUG] ✅ 소켓(${socket.id})을 방(${roomId})에 조인시키고 데이터 저장 완료.`);
 

@@ -22,9 +22,6 @@ const registerRoomHandlers = require('./handlers/roomHandler');
 const registerMessageHandlers = require('./handlers/messageHandler');
 const registerTurnHandlers = require('./handlers/turnHandler');
 
-// 미들웨어
-const turnAuthMiddleware = require('./middleware/turnAuth');
-
 // 라우트
 const initializeTurnStatsRoutes = require('./routes/turnStats');
 
@@ -66,8 +63,6 @@ async function startServer() {
   // Socket.IO 연결 핸들러
   const onConnection = (socket) => {
     console.log(`[CONNECT] 사용자 연결됨: ${socket.id}`);
-
-    socket.data.userId = socket.id;
 
     // 각 핸들러 모듈에 필요한 의존성 주입
     registerRoomHandlers(io, socket, pubClient);
