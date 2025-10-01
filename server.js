@@ -67,6 +67,14 @@ async function startServer() {
   await Promise.all([pubClient.connect(), subClient.connect()]);
   io.adapter(createAdapter(pubClient, subClient));
   
+  // 좀비 세션 정리 스케줄러 시작
+  const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5분
+  setInterval(() => {
+    cleanupZombieSessions(pubClient, io);
+  }, CLEANUP_INTERVAL);
+  
+  console.log(`[SCHEDULER] 좀비 세션 정리 스케줄러 시작 (${CLEANUP_INTERVAL / 1000}초 간격)`);
+  
   // API 라우트
   const turnStatsRouter = initializeTurnStatsRoutes(pubClient);
   app.use(turnStatsRouter);
@@ -129,6 +137,80 @@ const shutdown = async (signal) => {
 
   // 강제 종료 타이머
   setTimeout(() => {
+/**
+ * @fileoverview 좀비 세션 정리 스케줄러
+ * - 5분마다 실행
+ * - 하트비트가 2분 이상 없는 세션 제거
+ */
+async function cleanupZombieSessions(pubClient, io) {
+  console.log('[CLEANUP] 좀비 세션 검사 시작...');
+  
+  const HEARTBEAT_TIMEOUT = 2 * 60 * 1000; // 2분
+  const now = Date.now();
+  let cleanedCount = 0;
+
+  try {
+    // 모든 방 키 조회
+    const roomKeys = await pubClient.keys('*');
+    
+    // 메타데이터 키 제외
+    const actualRoomKeys = roomKeys.filter(key => 
+      !key.includes(':metadata') && 
+      !key.includes(':quota') && 
+      !key.includes(':connections') &&
+      !key.includes('rate_limit')
+    );
+
+    for (const roomId of actualRoomKeys) {
+      const usersData = await pubClient.hGetAll(roomId);
+      
+      for (const [userId, dataString] of Object.entries(usersData)) {
+        try {
+          const userData = JSON.parse(dataString);
+          const lastHeartbeat = userData.lastHeartbeat || userData.joinedAt || 0;
+          
+          // 하트비트 타임아웃 체크
+          if (now - lastHeartbeat > HEARTBEAT_TIMEOUT) {
+            console.log(`[CLEANUP] 좀비 세션 발견: ${userId} (마지막 하트비트: ${new Date(lastHeartbeat).toISOString()})`);
+            
+            // Redis에서 삭제
+            await pubClient.hDel(roomId, userId);
+            
+            // 소켓 강제 종료 (연결되어 있다면)
+            const socketId = userData.socketId;
+            const socket = io.sockets.sockets.get(socketId);
+            if (socket) {
+              socket.disconnect(true);
+            }
+            
+            // 다른 사용자들에게 알림
+            io.to(roomId).emit('user-left', userId);
+            
+            cleanedCount++;
+          }
+        } catch (parseError) {
+          console.error(`[CLEANUP] 파싱 오류: ${userId}`, parseError);
+        }
+      }
+      
+      // 방이 비었으면 삭제
+      const remainingUsers = await pubClient.hLen(roomId);
+      if (remainingUsers === 0) {
+        await pubClient.del(roomId);
+        console.log(`[CLEANUP] 빈 방 삭제: ${roomId}`);
+      }
+    }
+    
+    if (cleanedCount > 0) {
+      console.log(`[CLEANUP] ✅ ${cleanedCount}개의 좀비 세션 정리 완료`);
+    } else {
+      console.log(`[CLEANUP] ✅ 정리할 세션 없음`);
+    }
+    
+  } catch (error) {
+    console.error('[CLEANUP] ❌ 오류 발생:', error);
+  }
+}
     console.error('강제 종료: 연결이 제 시간에 닫히지 않았습니다.');
     process.exit(1);
   }, 10000);
