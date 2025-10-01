@@ -38,6 +38,9 @@ if (!process.env.PORT) {
 
 const app = express();
 
+// ✅ 수정: Helmet CSP 설정 (개발/프로덕션 환경 분리)
+const isDevelopment = process.env.NODE_ENV !== 'production';
+
 // --- 보안 미들웨어 ---
 app.use(helmet({
   contentSecurityPolicy: {
