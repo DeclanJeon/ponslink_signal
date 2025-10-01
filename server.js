@@ -39,7 +39,34 @@ if (!process.env.PORT) {
 const app = express();
 
 // --- 보안 미들웨어 ---
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      connectSrc: [
+        "'self'",
+        // 프로덕션 도메인
+        "https://ponslink.online",
+        "wss://ponslink.online",
+        // 개발 환경 허용
+        ...(isDevelopment ? [
+          "ws://localhost:*",
+          "http://localhost:*",
+          "ws://127.0.0.1:*",
+          "http://127.0.0.1:*"
+        ] : [])
+      ],
+      scriptSrc: ["'self'", "'unsafe-inline'"], // 필요시 조정
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      fontSrc: ["'self'", "data:"],
+      objectSrc: ["'none'"],
+      upgradeInsecureRequests: isDevelopment ? [] : null // 개발 환경에서는 비활성화
+    }
+  },
+  crossOriginEmbedderPolicy: false // SharedArrayBuffer 사용 시 필요
+}));
+
 app.use(cors({
   origin: process.env.CORS_ALLOWED_ORIGINS.split(','),
   methods: ["GET", "POST"],
