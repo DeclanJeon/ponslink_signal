@@ -59,11 +59,15 @@ app.use(helmet({
           "http://127.0.0.1:*"
         ] : [])
       ],
-      scriptSrc: ["'self'", "'unsafe-inline'"], // 필요시 조정
+      scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "https:"],
+      imgSrc: ["'self'", "data:", "https:", "blob:"], // ✅ blob: 추가
       fontSrc: ["'self'", "data:"],
       objectSrc: ["'none'"],
+
+      // ✅ 추가: media-src 디렉티브 명시
+      mediaSrc: ["'self'", "blob:", "data:"],
+
       upgradeInsecureRequests: isDevelopment ? [] : null // 개발 환경에서는 비활성화
     }
   },
