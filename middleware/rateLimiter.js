@@ -1,5 +1,5 @@
 /**
- * @fileoverview Redis 기반 분산 Rate Limiting 미들웨어
+ * @fileoverview Redis 기반 분산 Rate Limiting 미들웨어 (안정성 강화)
  * @module middleware/rateLimiter
  */
 
@@ -11,49 +11,64 @@ let rateLimiter;
 let ipRateLimiter;
 
 /**
- * Redis 클라이언트 초기화
+ * ✅ 개선: Redis 클라이언트 초기화 (Lua 스크립트 로딩 포함)
  */
-const initializeRedis = () => {
+const initializeRedis = async () => {
   if (redisClient) return;
 
   redisClient = createClient({
     url: process.env.REDIS_URL || 'redis://localhost:6379',
-    enable_offline_queue: false // 연결 실패 시 즉시 에러 반환
+    socket: {
+      reconnectStrategy: (retries) => Math.min(retries * 50, 500)
+    }
   });
 
   redisClient.on('error', (err) => {
     console.error('[RateLimiter] Redis 연결 에러:', err);
-    // Redis 연결 실패 시 Rate Limiting 비활성화 (Fail-open)
     rateLimiter = null;
     ipRateLimiter = null;
   });
 
-  redisClient.connect().catch(console.error);
-
-  // 사용자 ID 기반 Rate Limiter (1분당 30회)
-  rateLimiter = new RateLimiterRedis({
-    storeClient: redisClient,
-    keyPrefix: 'rate_limit_user',
-    points: 30,
-    duration: 60,
-    blockDuration: 60 * 5 // 5분간 차단
+  redisClient.on('connect', () => {
+    console.log('[RateLimiter] Redis 연결 성공');
   });
 
-  // IP 주소 기반 Rate Limiter (1분당 100회)
-  ipRateLimiter = new RateLimiterRedis({
-    storeClient: redisClient,
-    keyPrefix: 'rate_limit_ip',
-    points: 100,
-    duration: 60,
-    blockDuration: 60 * 10 // 10분간 차단
-  });
+  try {
+    await redisClient.connect();
+
+    // ✅ 추가: rate-limiter-flexible이 Lua 스크립트를 로딩할 시간 확보
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // 사용자 ID 기반 Rate Limiter
+    rateLimiter = new RateLimiterRedis({
+      storeClient: redisClient,
+      keyPrefix: 'rate_limit_user',
+      points: 30,
+      duration: 60,
+      blockDuration: 60 * 5,
+      insuranceLimiter: null // ✅ 추가: 메모리 백업 비활성화 (선택적)
+    });
+
+    // IP 주소 기반 Rate Limiter
+    ipRateLimiter = new RateLimiterRedis({
+      storeClient: redisClient,
+      keyPrefix: 'rate_limit_ip',
+      points: 100,
+      duration: 60,
+      blockDuration: 60 * 10,
+      insuranceLimiter: null
+    });
+
+    console.log('[RateLimiter] ✅ Rate Limiter 초기화 완료');
+  } catch (error) {
+    console.error('[RateLimiter] 초기화 실패:', error);
+  }
 };
 
 /**
  * Socket.IO Rate Limiting 미들웨어
  */
 const socketRateLimiterMiddleware = async (socket, next) => {
-  // Rate Limiter가 초기화되지 않은 경우 통과 (Fail-open)
   if (!rateLimiter || !ipRateLimiter) {
     return next();
   }
@@ -62,22 +77,17 @@ const socketRateLimiterMiddleware = async (socket, next) => {
   const ip = socket.handshake.address;
 
   try {
-    // 1. IP 주소 기반 검사
     await ipRateLimiter.consume(ip);
-
-    // 2. 사용자 ID 기반 검사
     await rateLimiter.consume(userId);
 
     next();
   } catch (rejRes) {
     if (rejRes instanceof Error) {
-      // Redis 에러 등 내부 문제
       console.error('[RateLimiter] 내부 에러:', rejRes);
       return next(); // Fail-open
     }
 
-    // Rate Limit 초과
-    const isIpLimit = rejRes.keyPrefix.includes('ip');
+    const isIpLimit = rejRes.keyPrefix?.includes('ip');
     const key = isIpLimit ? ip : userId;
     const blockDuration = Math.ceil(rejRes.msBeforeNext / 1000);
 
@@ -92,14 +102,11 @@ const socketRateLimiterMiddleware = async (socket, next) => {
       message: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.',
       retryAfter: blockDuration
     });
-
-    // 연결을 끊지 않고 에러만 전달
-    // next(new Error('Rate limit exceeded'));
   }
 };
 
 /**
- * Express Rate Limiting 미들웨어 (API용)
+ * Express Rate Limiting 미들웨어
  */
 const expressRateLimiterMiddleware = async (req, res, next) => {
   if (!ipRateLimiter) {
@@ -114,7 +121,7 @@ const expressRateLimiterMiddleware = async (req, res, next) => {
   } catch (rejRes) {
     if (rejRes instanceof Error) {
       console.error('[RateLimiter] 내부 에러:', rejRes);
-      return next(); // Fail-open
+      return next();
     }
 
     const blockDuration = Math.ceil(rejRes.msBeforeNext / 1000);

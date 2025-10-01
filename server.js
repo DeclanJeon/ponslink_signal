@@ -39,14 +39,14 @@ if (!process.env.PORT) {
 const app = express();
 
 // --- 보안 미들웨어 ---
-app.use(helmet()); // 기본 보안 헤더 설정
+app.use(helmet());
 app.use(cors({
   origin: process.env.CORS_ALLOWED_ORIGINS.split(','),
   methods: ["GET", "POST"],
   credentials: true
 }));
 app.use(express.json());
-app.use(expressRateLimiterMiddleware); // API Rate Limiting
+app.use(expressRateLimiterMiddleware);
 
 const server = http.createServer(app);
 
@@ -55,13 +55,27 @@ const io = new Server(server, {
     origin: process.env.CORS_ALLOWED_ORIGINS.split(','),
     methods: ["GET", "POST"]
   },
-  maxHttpBufferSize: 1e8 // 100 MB
+  maxHttpBufferSize: 1e8
 });
 
 // --- Redis 설정 ---
 initializeRedis(); // Rate Limiter용 Redis 클라이언트 초기화
-const pubClient = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+
+// ✅ 수정: Redis 클라이언트를 별도로 생성 (Adapter용)
+const pubClient = createClient({ 
+  url: process.env.REDIS_URL || 'redis://localhost:6379',
+  socket: {
+    reconnectStrategy: (retries) => Math.min(retries * 50, 500)
+  }
+});
 const subClient = pubClient.duplicate();
+
+// ✅ 추가: Redis 에러 핸들러
+pubClient.on('error', (err) => console.error('[Redis Pub] 에러:', err));
+subClient.on('error', (err) => console.error('[Redis Sub] 에러:', err));
+
+// ✅ 추가: Graceful Shutdown 플래그
+let isShuttingDown = false;
 
 async function startServer() {
   await Promise.all([pubClient.connect(), subClient.connect()]);
@@ -69,8 +83,10 @@ async function startServer() {
   
   // 좀비 세션 정리 스케줄러 시작
   const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5분
-  setInterval(() => {
-    cleanupZombieSessions(pubClient, io);
+  const cleanupTimer = setInterval(() => {
+    if (!isShuttingDown) { // ✅ Shutdown 중에는 실행 안 함
+      cleanupZombieSessions(pubClient, io);
+    }
   }, CLEANUP_INTERVAL);
   
   console.log(`[SCHEDULER] 좀비 세션 정리 스케줄러 시작 (${CLEANUP_INTERVAL / 1000}초 간격)`);
@@ -85,6 +101,14 @@ async function startServer() {
   // Socket.IO 연결 핸들러
   const onConnection = (socket) => {
     console.log(`[CONNECT] 클라이언트 연결: ${socket.id}`);
+
+    // ✅ 수정: Redis 클라이언트 상태 체크 추가
+    if (!pubClient.isOpen) {
+      console.error('[CONNECT] Redis 연결이 끊어져 있습니다.');
+      socket.emit('error', { message: '서버 연결 오류' });
+      socket.disconnect(true);
+      return;
+    }
 
     // 핸들러 등록
     registerRoomHandlers(io, socket, pubClient);
@@ -115,34 +139,63 @@ async function startServer() {
   server.listen(PORT, () => {
     console.log(`🚀 서버가 ${PORT} 포트에서 실행 중입니다.`);
   });
+
+  // ✅ 추가: Cleanup Timer 반환 (Shutdown 시 정리용)
+  return cleanupTimer;
 }
 
-// --- Graceful Shutdown ---
-const shutdown = async (signal) => {
+// --- ✅ 개선된 Graceful Shutdown ---
+const shutdown = async (signal, cleanupTimer) => {
+  if (isShuttingDown) return; // 중복 호출 방지
+  isShuttingDown = true;
+  
   console.log(`${signal} 수신. 서버를 종료합니다...`);
   
+  // 1. 새 연결 차단
   io.close();
   
+  // 2. Cleanup Timer 정리
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer);
+  }
+  
+  // 3. 모든 소켓 강제 종료 (Redis 사용 전에)
+  const sockets = await io.fetchSockets();
+  console.log(`[SHUTDOWN] ${sockets.length}개의 활성 소켓 종료 중...`);
+  
+  sockets.forEach(socket => {
+    socket.disconnect(true);
+  });
+  
+  // 4. Redis 연결 종료
   try {
     await pubClient.quit();
     await subClient.quit();
+    console.log('[SHUTDOWN] Redis 클라이언트 종료 완료');
   } catch (error) {
-    console.error('Redis 클라이언트 종료 중 에러:', error);
+    console.error('[SHUTDOWN] Redis 클라이언트 종료 중 에러:', error);
   }
   
+  // 5. HTTP 서버 종료
   server.close(() => {
-    console.log('모든 연결이 종료되었습니다.');
+    console.log('[SHUTDOWN] 모든 연결이 종료되었습니다.');
     process.exit(0);
   });
 
   // 강제 종료 타이머
   setTimeout(() => {
-/**
- * @fileoverview 좀비 세션 정리 스케줄러
- * - 5분마다 실행
- * - 하트비트가 2분 이상 없는 세션 제거
- */
+    console.error('[SHUTDOWN] 강제 종료: 연결이 제 시간에 닫히지 않았습니다.');
+    process.exit(1);
+  }, 10000);
+};
+
 async function cleanupZombieSessions(pubClient, io) {
+  // ✅ 추가: Shutdown 중이거나 Redis 연결이 끊어졌으면 스킵
+  if (isShuttingDown || !pubClient.isOpen) {
+    console.log('[CLEANUP] 스킵: 서버 종료 중 또는 Redis 연결 끊김');
+    return;
+  }
+
   console.log('[CLEANUP] 좀비 세션 검사 시작...');
   
   const HEARTBEAT_TIMEOUT = 2 * 60 * 1000; // 2분
@@ -150,10 +203,8 @@ async function cleanupZombieSessions(pubClient, io) {
   let cleanedCount = 0;
 
   try {
-    // 모든 방 키 조회
     const roomKeys = await pubClient.keys('*');
     
-    // 메타데이터 키 제외
     const actualRoomKeys = roomKeys.filter(key => 
       !key.includes(':metadata') && 
       !key.includes(':quota') && 
@@ -169,21 +220,17 @@ async function cleanupZombieSessions(pubClient, io) {
           const userData = JSON.parse(dataString);
           const lastHeartbeat = userData.lastHeartbeat || userData.joinedAt || 0;
           
-          // 하트비트 타임아웃 체크
           if (now - lastHeartbeat > HEARTBEAT_TIMEOUT) {
             console.log(`[CLEANUP] 좀비 세션 발견: ${userId} (마지막 하트비트: ${new Date(lastHeartbeat).toISOString()})`);
             
-            // Redis에서 삭제
             await pubClient.hDel(roomId, userId);
             
-            // 소켓 강제 종료 (연결되어 있다면)
             const socketId = userData.socketId;
             const socket = io.sockets.sockets.get(socketId);
             if (socket) {
               socket.disconnect(true);
             }
             
-            // 다른 사용자들에게 알림
             io.to(roomId).emit('user-left', userId);
             
             cleanedCount++;
@@ -193,7 +240,6 @@ async function cleanupZombieSessions(pubClient, io) {
         }
       }
       
-      // 방이 비었으면 삭제
       const remainingUsers = await pubClient.hLen(roomId);
       if (remainingUsers === 0) {
         await pubClient.del(roomId);
@@ -211,15 +257,18 @@ async function cleanupZombieSessions(pubClient, io) {
     console.error('[CLEANUP] ❌ 오류 발생:', error);
   }
 }
-    console.error('강제 종료: 연결이 제 시간에 닫히지 않았습니다.');
+
+let cleanupTimer;
+
+startServer()
+  .then(timer => {
+    cleanupTimer = timer;
+  })
+  .catch(err => {
+    console.error("서버 시작 중 치명적 에러 발생:", err);
     process.exit(1);
-  }, 10000);
-};
+  });
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
-
-startServer().catch(err => {
-  console.error("서버 시작 중 치명적 에러 발생:", err);
-  process.exit(1);
-});
+// ✅ 수정: Shutdown 핸들러에 cleanupTimer 전달
+process.on('SIGTERM', () => shutdown('SIGTERM', cleanupTimer));
+process.on('SIGINT', () => shutdown('SIGINT', cleanupTimer));
