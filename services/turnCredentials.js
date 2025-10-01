@@ -1,8 +1,7 @@
 /**
- * @fileoverview TURN 자격 증명 서비스 (보안 강화 버전)
+ * @fileoverview TURN 자격 증명 서비스 (Static Auth 버전)
  * @module services/turnCredentials
  */
-const crypto = require('crypto');
 const TurnConfig = require('../config/turnConfig');
 
 class TurnCredentialsService {
@@ -12,30 +11,28 @@ class TurnCredentialsService {
   }
   
   /**
-   * HMAC 기반 자격 증명 생성
+   * Static 자격 증명 반환
+   * @param {string} userId - 사용자 ID (로깅용)
+   * @param {string} roomId - 방 ID (로깅용)
+   * @returns {Object} TURN 자격 증명
    */
   generateCredentials(userId, roomId) {
-    // TTL 단축 (7일 → 1일)
-    const ttl = this.config.sessionTimeout; // 86400초 (1일)
-    const timestamp = Math.floor(Date.now() / 1000) + ttl;
+    // Static Auth: 환경 변수에서 직접 가져옴
+    const username = this.config.username;
+    const password = this.config.password;
     
-    // Username 형식: timestamp:userId:roomId
-    const username = `${timestamp}:${userId}:${roomId}`;
+    // 로깅용 메타데이터
+    const timestamp = Math.floor(Date.now() / 1000);
     
-    // HMAC-SHA256 암호화
-    const hmac = crypto.createHmac('sha256', this.config.secret);
-    hmac.update(username);
-    const password = hmac.digest('base64');
-    
-    // 생성된 자격 증명 캐싱 (선택적)
-    // this.cacheCredentials(userId, roomId, username, timestamp);
+    console.log(`[TurnCredentials] Static credentials issued for ${userId} in room ${roomId}`);
     
     return {
       username,
       password,
-      ttl,
+      ttl: this.config.sessionTimeout, // 참고용 (실제로는 무제한)
       timestamp,
-      realm: this.config.realm
+      realm: this.config.realm,
+      authType: 'static' // 인증 타입 표시
     };
   }
   
@@ -43,7 +40,6 @@ class TurnCredentialsService {
    * 사용자 일일 Quota 확인
    */
   async checkUserQuota(userId) {
-    // Quota 기능 비활성화 시 무제한 반환
     if (!this.config.enableQuota) {
       return {
         used: 0,
@@ -73,7 +69,6 @@ class TurnCredentialsService {
       };
     } catch (error) {
       console.error('[TurnCredentials] Quota 확인 실패:', error);
-      // Redis 에러 시 안전하게 무제한으로 처리
       return { used: 0, limit: Infinity, remaining: Infinity, percentage: 0, unlimited: true };
     }
   }
@@ -82,7 +77,6 @@ class TurnCredentialsService {
    * 사용자 동시 접속 수 제한 확인
    */
   async checkConnectionLimit(userId) {
-    // 연결 제한 기능 비활성화 시 무제한 반환
     if (!this.config.enableConnectionLimit) {
       return {
         allowed: true,
@@ -112,31 +106,18 @@ class TurnCredentialsService {
   }
   
   /**
-   * 자격 증명 유효성 검증 (coturn에서 사용)
+   * 자격 증명 유효성 검증 (Static Auth에서는 단순 비교)
+   * @param {string} username - 제공된 사용자명
+   * @param {string} password - 제공된 비밀번호
+   * @returns {boolean} 유효성 여부
    */
   validateCredentials(username, password) {
     try {
-      const parts = username.split(':');
-      if (parts.length < 3) return false;
+      // 단순 문자열 비교 (타이밍 공격 방지)
+      const isUsernameValid = username === this.config.username;
+      const isPasswordValid = password === this.config.password;
       
-      const timestamp = parseInt(parts[0], 10);
-      const now = Math.floor(Date.now() / 1000);
-      
-      // 만료 시간 확인
-      if (timestamp < now) {
-        return false;
-      }
-      
-      // HMAC 검증 (SHA256)
-      const hmac = crypto.createHmac('sha256', this.config.secret);
-      hmac.update(username);
-      const expectedPassword = hmac.digest('base64');
-      
-      // 타이밍 공격 방지를 위해 timingSafeEqual 사용
-      return crypto.timingSafeEqual(
-        Buffer.from(password),
-        Buffer.from(expectedPassword)
-      );
+      return isUsernameValid && isPasswordValid;
     } catch (error) {
       console.error('[TurnCredentials] 자격 증명 검증 오류:', error);
       return false;
@@ -153,12 +134,8 @@ class TurnCredentialsService {
     const quotaKey = `turn:quota:${userId}:${dateKey}`;
     
     try {
-      // 원자적 증가
       const newTotal = await this.redis.incrBy(quotaKey, bytesUsed);
-      
-      // TTL 설정 (2일)
       await this.redis.expire(quotaKey, 86400 * 2);
-
       return newTotal;
     } catch (error) {
       console.error('[TurnCredentials] 사용량 기록 실패:', error);
