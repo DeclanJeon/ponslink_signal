@@ -1,36 +1,35 @@
 /**
- * TURN 서버 설정 관리 - UNLIMITED POWER! ⚡
+ * @fileoverview TURN 서버 설정 (보안 강화 버전)
  * @module config/turnConfig
  */
 const crypto = require('crypto');
 
 class TurnConfig {
-  static #instance = null;
-  static #config = null;
-  
   /**
-   * 환경변수 검증 - 최소한의 검증만
+   * 설정 유효성 검증
    */
   static validate() {
     const required = ['TURN_SERVER_URL', 'TURN_SECRET'];
     const missing = required.filter(key => !process.env[key]);
     
     if (missing.length > 0) {
+      console.error(`치명적 에러: 누락된 TURN 설정: ${missing.join(', ')}`);
       throw new Error(`Missing TURN configuration: ${missing.join(', ')}`);
     }
     
-    // Secret 자동 생성 (없을 경우)
+    // Secret 길이 검증 (최소 32자)
     if (!process.env.TURN_SECRET || process.env.TURN_SECRET.length < 32) {
-      process.env.TURN_SECRET = crypto.randomBytes(64).toString('base64'); // 더 강력한 키
-      console.log('🔐 Generated TURN_SECRET:', process.env.TURN_SECRET);
+      process.env.TURN_SECRET = crypto.randomBytes(64).toString('base64');
+      console.warn('주의: TURN_SECRET이 안전하지 않아 새로 생성했습니다. .env 파일에 저장하세요.');
+      console.log('Generated TURN_SECRET:', process.env.TURN_SECRET);
     }
     
-    console.log('✅ TURN configuration validated - UNLIMITED MODE');
+    console.log('✅ TURN 설정이 유효합니다.');
     return true;
   }
   
   /**
-   * TURN 설정 반환 - 모든 제한 해제
+   * TURN 설정 객체 반환
    */
   static getConfig() {
     return {
@@ -38,17 +37,22 @@ class TurnConfig {
       secret: process.env.TURN_SECRET,
       realm: process.env.TURN_REALM || 'ponslink.com',
       
-      // 🔥 성능 제한 완전 해제
-      maxBandwidth: Infinity,              // 무제한 대역폭
-      sessionTimeout: 604800,              // 7일 (최대값)
-      enableMetrics: false,                // 메트릭 비활성화 (성능 향상)
-      maxConnectionsPerUser: Infinity,     // 무제한 연결
-      quotaPerDay: Infinity,               // 무제한 일일 할당량
+      // 자격 증명 만료 시간 (1일)
+      sessionTimeout: parseInt(process.env.TURN_SESSION_TIMEOUT || '86400'),
       
-      // 🚀 성능 최적화 설정
+      // 보안 및 리소스 제한
+      enableQuota: process.env.TURN_ENABLE_QUOTA === 'true',
+      enableConnectionLimit: process.env.TURN_ENABLE_CONNECTION_LIMIT === 'true',
+      quotaPerDay: parseInt(process.env.TURN_QUOTA_GB || '1') * 1024 * 1024 * 1024, // GB 단위
+      maxConnectionsPerUser: parseInt(process.env.TURN_MAX_CONNECTIONS || '5'),
+      
+      // 모니터링
+      enableMetrics: process.env.TURN_ENABLE_METRICS === 'true',
+      
+      // 프로토콜 설정
       enableTLS: process.env.TURN_ENABLE_TLS === 'true',
-      enableTCP: true,
-      enableUDP: true,
+      enableTCP: process.env.TURN_ENABLE_TCP !== 'false',
+      enableUDP: process.env.TURN_ENABLE_UDP !== 'false',
       
       // 포트 설정
       ports: {
@@ -57,51 +61,50 @@ class TurnConfig {
         tls: parseInt(process.env.TURN_PORT_TLS || '5349')
       },
       
-      // 🎯 고급 성능 설정
+      // 성능 관련 설정 (고급)
       performance: {
-        maxPacketSize: 65535,             // 최대 패킷 크기
-        channelLifetime: 600,             // 채널 수명 (10분)
-        permissionLifetime: 300,          // 권한 수명 (5분)
-        maxAllocations: 100000,           // 최대 할당 수
-        minPort: 49152,                   // 최소 포트 범위
-        maxPort: 65535,                   // 최대 포트 범위
-        threadPoolSize: 16,               // 스레드 풀 크기
-        bufferSize: 1048576              // 1MB 버퍼
+        maxPacketSize: 65535,
+        channelLifetime: 600,
+        permissionLifetime: 300,
+        minPort: parseInt(process.env.TURN_MIN_PORT || '49152'),
+        maxPort: parseInt(process.env.TURN_MAX_PORT || '65535'),
       }
     };
   }
   
   /**
-   * ICE 서버 목록 생성 - 최대 성능 구성
+   * ICE 서버 목록 생성
    */
   static getIceServers(username, credential) {
     const config = this.getConfig();
     const servers = [];
     
-    // 🌟 구글 STUN 서버 전체 활용
+    // 기본 STUN 서버 추가
     servers.push(
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' }
+      { urls: 'stun:stun2.l.google.com:19302' }
     );
     
-    // 🔥 TURN 서버 - 모든 프로토콜 활성화
+    // TURN 서버 추가
     if (config.serverUrl && username && credential) {
       // UDP TURN
-      servers.push({
-        urls: `turn:${config.serverUrl}:${config.ports.udp}?transport=udp`,
-        username: username,
-        credential: credential
-      });
+      if (config.enableUDP) {
+        servers.push({
+          urls: `turn:${config.serverUrl}:${config.ports.udp}?transport=udp`,
+          username: username,
+          credential: credential
+        });
+      }
       
       // TCP TURN
-      servers.push({
-        urls: `turn:${config.serverUrl}:${config.ports.tcp}?transport=tcp`,
-        username: username,
-        credential: credential
-      });
+      if (config.enableTCP) {
+        servers.push({
+          urls: `turn:${config.serverUrl}:${config.ports.tcp}?transport=tcp`,
+          username: username,
+          credential: credential
+        });
+      }
       
       // TLS TURN (TURNS)
       if (config.enableTLS) {

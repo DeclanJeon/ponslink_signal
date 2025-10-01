@@ -1,5 +1,5 @@
 /**
- * TURN 서버 자격증명 제공 핸들러 - PERFORMANCE MODE 🏎️
+ * @fileoverview TURN 자격 증명 핸들러 (연결 안정화 버전)
  * @module handlers/turnHandler
  */
 const TurnCredentialsService = require('../services/turnCredentials');
@@ -9,93 +9,116 @@ module.exports = (io, socket, pubClient) => {
   const turnCredentials = new TurnCredentialsService(pubClient);
   
   /**
-   * TURN 자격증명 즉시 제공 - 검증 최소화
+   * TURN 자격 증명 요청 처리
    */
   const getTurnCredentials = async () => {
+    const userId = socket.data.userId;
+    const roomId = socket.data.roomId;
 
-    console.log(`[TURN] ⚡ Fast credentials for ${socket.data.userId}`);
-    
-    // 🔥 기본 검증만 수행
-    if (!socket.data.userId) {
+    if (!userId) {
+      console.warn(`[TURN] User ID가 없는 소켓(${socket.id})의 자격 증명 요청`);
       socket.emit('turn-credentials', { 
-        error: 'User ID required',
+        error: 'User ID가 필요합니다.',
         code: 'NO_USER_ID'
       });
       return;
     }
+
+    console.log(`[TURN] ${userId}의 자격 증명 요청`);
     
     try {
-      const { userId, roomId } = socket.data;
+      // 1. 사용자 연결 제한 확인
+      const connectionLimit = await turnCredentials.checkConnectionLimit(userId);
+      if (!connectionLimit.allowed) {
+        console.warn(`[TURN] ${userId}의 연결 제한 초과`);
+        socket.emit('turn-credentials', {
+          error: '최대 연결 수를 초과했습니다.',
+          code: 'CONNECTION_LIMIT_EXCEEDED'
+        });
+        return;
+      }
+
+      // 2. 사용자 Quota 확인
+      const quota = await turnCredentials.checkUserQuota(userId);
+      if (quota.remaining <= 0 && !quota.unlimited) {
+        console.warn(`[TURN] ${userId}의 Quota 초과`);
+        socket.emit('turn-credentials', {
+          error: '일일 사용량을 초과했습니다.',
+          code: 'QUOTA_EXCEEDED'
+        });
+        return;
+      }
       
-      // 🚀 즉시 자격증명 생성 (제한 없음)
+      // 3. 자격 증명 생성
       const credentials = turnCredentials.generateCredentials(
         userId, 
         roomId || 'default'
       );
       
-      // ICE 서버 구성
+      // 4. ICE 서버 목록 생성
       const iceServers = TurnConfig.getIceServers(
         credentials.username,
         credentials.password
       );
       
-      // 🎯 최적화된 응답
+      // 5. 클라이언트에 전송
       socket.emit('turn-credentials', {
         iceServers,
         ttl: credentials.ttl,
         timestamp: Date.now(),
-        performance: {
-          unlimited: true,
-          maxBandwidth: 'unlimited',
-          maxConnections: 'unlimited',
-          quota: 'unlimited'
-        },
-        config: {
-          iceTransportPolicy: 'all',        // 모든 후보 사용
-          bundlePolicy: 'max-bundle',       // 최대 번들링
-          rtcpMuxPolicy: 'require',         // RTCP 멀티플렉싱
-          iceCandidatePoolSize: 10          // ICE 후보 풀 크기
+        quota, // Quota 정보 포함
+        stats: {
+          connectionCount: connectionLimit.current,
+          connectionLimit: connectionLimit.limit,
         }
       });
       
-      console.log(`[TURN] ✅ Unlimited credentials issued to ${userId}`);
+      console.log(`[TURN] ${userId}에게 자격 증명 발급 완료`);
       
+      // 연결 수 증가
+      await turnCredentials.updateConnectionCount(userId, true);
+
     } catch (error) {
-      console.error('[TURN] Failed to generate credentials:', error);
+      console.error('[TURN] 자격 증명 생성 실패:', error);
       
-      // 에러 시에도 기본 STUN 서버 제공
+      // 오류 발생 시 최소한의 STUN 서버만 제공
       socket.emit('turn-credentials', {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' }
         ],
-        fallback: true
+        fallback: true,
+        error: '서버 내부 오류로 TURN 자격 증명을 발급할 수 없습니다.'
       });
     }
   };
   
   /**
-   * 사용량 보고 - 무시 (성능 최적화)
+   * TURN 서버 사용량 보고
+   * 클라이언트에서 주기적으로 호출하여 사용량 기록
    */
   const reportUsage = async (data) => {
-    // 🔥 메트릭 수집 스킵 (성능 우선)
-    return;
+    const { userId } = socket.data;
+    const { bytesUsed } = data;
+
+    if (userId && typeof bytesUsed === 'number' && bytesUsed > 0) {
+      await turnCredentials.recordUsage(userId, bytesUsed);
+    }
   };
   
   /**
-   * 연결 상태 보고 - 최소 로깅만
+   * 클라이언트 연결 해제 시 처리
    */
-  const reportConnectionState = async (data) => {
-    const { state, candidateType } = data;
-    
-    if (state === 'connected') {
-      console.log(`[TURN] ✅ ${socket.data.userId} connected via ${candidateType}`);
+  const handleDisconnect = async () => {
+    const { userId } = socket.data;
+    if (userId) {
+      // 연결 수 감소
+      await turnCredentials.updateConnectionCount(userId, false);
     }
-    // 실패는 무시 (성능 우선)
   };
   
   // 이벤트 리스너 등록
   socket.on('request-turn-credentials', getTurnCredentials);
   socket.on('report-turn-usage', reportUsage);
-  socket.on('report-connection-state', reportConnectionState);
+  socket.on('disconnect', handleDisconnect);
 };
