@@ -130,7 +130,7 @@ async function startServer() {
   app.use(turnStatsRouter);
 
   // Socket.IO 미들웨어
-  io.use(socketRateLimiterMiddleware);
+  // io.use(socketRateLimiterMiddleware);
   
   // Socket.IO 연결 핸들러
   const onConnection = (socket) => {
