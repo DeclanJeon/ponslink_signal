@@ -34,14 +34,14 @@ module.exports = (io, socket, pubClient) => {
         return;
       }
 
-      await socket.join(roomId);
-      
       socket.data.userId = userId;
       socket.data.roomId = roomId;
       socket.data.nickname = nickname;
       socket.data.joinedAt = Date.now();
 
       console.log(`[JOIN] 소켓 데이터 설정 완료: ${socket.id}`);
+
+      await socket.join(roomId);
 
       const userData = JSON.stringify({
         socketId: socket.id,
