@@ -11,12 +11,12 @@ module.exports = (io, socket, pubClient) => {
   /**
    * TURN 자격 증명 요청 처리
    */
-  const getTurnCredentials = async () => {
-    const userId = socket.data.userId;
-    const roomId = socket.data.roomId;
+  const getTurnCredentials = async (config) => {
+    const userId = config.userId;
+    const roomId = config.roomId;
 
     if (!userId) {
-      console.warn(`[TURN] User ID가 없는 소켓(${socket.id})의 자격 증명 요청`);
+      console.warn(`[TURN] User ID가 없는 소켓(${userId})의 자격 증명 요청`);
       socket.emit('turn-credentials', { 
         error: 'User ID가 필요합니다.',
         code: 'NO_USER_ID'
@@ -52,7 +52,7 @@ module.exports = (io, socket, pubClient) => {
       // 3. 자격 증명 생성
       const credentials = turnCredentials.generateCredentials(
         userId, 
-        roomId || 'default'
+        roomId || config.roomId || 'default'
       );
       
       // 4. ICE 서버 목록 생성
